@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+python-multipart
+langgraph
+langchain
+langchain-openai
+python-dotenv
+qdrant-client
+pypdf2
+pydantic
+pandasai
+pandas
+openpyxl
