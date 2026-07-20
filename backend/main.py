@@ -1,36 +1,153 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
-import json
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel
-from typing import Optional
-from database import save_evaluation, get_all_evaluations, get_evaluation
+from typing import Optional, List
+from database import save_evaluation, get_all_evaluations, get_evaluation, get_client as get_qdrant
 from agent_pipeline import evaluator_app
+import os
+import uuid
+import PyPDF2
+from io import BytesIO
+import pandas as pd
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import Distance, VectorParams, PointStruct
 
 app = FastAPI(title="Agentic Proposal Evaluator")
 
+# Qdrant setup using database.py get_client
+
+def get_embeddings(text: str) -> list[float]:
+    if "AZURE_OPENAI_API_KEY" in os.environ:
+        try:
+            from langchain_openai import AzureOpenAIEmbeddings
+            embedder = AzureOpenAIEmbeddings(
+                azure_deployment=os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-ada-002"),
+                api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
+                azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
+                api_key=os.environ.get("AZURE_OPENAI_API_KEY")
+            )
+            return embedder.embed_query(text)
+        except Exception:
+            pass
+    return [0.0] * 1536
+
+def process_file_content(file: UploadFile) -> str:
+    content = file.file.read()
+    if file.filename.endswith(".pdf"):
+        reader = PyPDF2.PdfReader(BytesIO(content))
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+        return text
+    elif file.filename.endswith(".xlsx") or file.filename.endswith(".xls"):
+        df = pd.read_excel(BytesIO(content))
+        return df.to_string()
+    return content.decode("utf-8", errors="ignore")
+
+def store_in_qdrant(collection_name: str, text: str, extra_payload: dict = None):
+    client = get_qdrant()
+    if not client.collection_exists(collection_name):
+        client.create_collection(
+            collection_name=collection_name,
+            vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
+        )
+    
+    chunks = [text[i:i+1000] for i in range(0, len(text), 1000)]
+    points = []
+    
+    # Generate unique point IDs using uuid
+    for chunk in chunks:
+        if not chunk.strip(): continue
+        vector = get_embeddings(chunk)
+        payload = {"text": chunk}
+        if extra_payload:
+            payload.update(extra_payload)
+        points.append(
+            PointStruct(id=str(uuid.uuid4()), vector=vector, payload=payload)
+        )
+    if points:
+        client.upsert(collection_name=collection_name, points=points)
+
 class ProposalInput(BaseModel):
-    proposal_text: str
-    timeline_text: Optional[str] = ""
-    financials: Optional[str] = ""
-    market: Optional[str] = ""
-    risks: Optional[str] = ""
-    roi_model: Optional[str] = ""
-    financials_file_base64: Optional[str] = ""
+    proposal_id: str
+
+class CriteriaInput(BaseModel):
+    criteria_text: str
+
+CRITERIA_FILE = "criteria.txt"
+
+@app.post("/criteria")
+def save_criteria(data: CriteriaInput):
+    store_in_qdrant("evaluation_criteria", data.criteria_text)
+    return {"status": "success"}
+
+@app.get("/criteria")
+def get_criteria():
+    criteria_text = ""
+    client = get_qdrant()
+    if client.collection_exists("evaluation_criteria"):
+        scroll_res, _ = client.scroll(
+            collection_name="evaluation_criteria", 
+            limit=1000, 
+            with_payload=True
+        )
+        for point in scroll_res:
+            criteria_text += point.payload.get("text", "") + "\n"
+    return {"criteria_text": criteria_text}
+
+@app.post("/upload_criteria")
+def upload_criteria(files: List[UploadFile] = File(...)):
+    collection_name = "evaluation_criteria"
+    combined_text = ""
+    for f in files:
+        combined_text += f"\n--- {f.filename} ---\n" + process_file_content(f)
+    
+    store_in_qdrant(collection_name, combined_text)
+    return {"status": "success"}
+
+@app.post("/upload_knowledge")
+def upload_knowledge(files: List[UploadFile] = File(...)):
+    proposal_id = str(uuid.uuid4())
+    collection_name = "business_proposals"
+    combined_text = ""
+    for f in files:
+        combined_text += f"\n--- {f.filename} ---\n" + process_file_content(f)
+    
+    store_in_qdrant(collection_name, combined_text, extra_payload={"proposal_id": proposal_id})
+    return {"status": "success", "proposal_id": proposal_id}
 
 @app.post("/evaluate")
 def evaluate_proposal(data: ProposalInput):
+    collection_name = "business_proposals"
+    proposal_text = ""
+    client = get_qdrant()
+    
+    if client.collection_exists(collection_name):
+        scroll_res, _ = client.scroll(
+            collection_name=collection_name, 
+            limit=1000, 
+            with_payload=True
+        )
+        for point in scroll_res:
+            if point.payload.get("proposal_id") == data.proposal_id:
+                proposal_text += point.payload.get("text", "") + "\n"
+
+    criteria_text = ""
+    if client.collection_exists("evaluation_criteria"):
+        scroll_res, _ = client.scroll(
+            collection_name="evaluation_criteria", 
+            limit=1000, 
+            with_payload=True
+        )
+        for point in scroll_res:
+            criteria_text += point.payload.get("text", "") + "\n"
+
     initial_state = {
-        "proposal_text": data.proposal_text,
-        "timeline_text": data.timeline_text,
-        "financials": data.financials,
-        "financials_file_base64": data.financials_file_base64,
-        "market": data.market,
-        "risks": data.risks,
-        "roi_model": data.roi_model,
+        "proposal_text": proposal_text,
+        "financials_base64": "",
+        "criteria_text": criteria_text,
         "structured_data": {},
         "classification": {},
         "criteria_scores": {},
-        "roi_calculations": {},
         "final_score": 0.0,
         "rating": "",
         "final_report": ""
@@ -39,8 +156,9 @@ def evaluate_proposal(data: ProposalInput):
     try:
         final_state = evaluator_app.invoke(initial_state)
         
+        # Save evaluation
         record_id = save_evaluation(
-            proposal_data=data.dict(),
+            proposal_data={"proposal_id": data.proposal_id},
             evaluation_result=final_state
         )
         
@@ -51,45 +169,6 @@ def evaluate_proposal(data: ProposalInput):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/evaluate_stream")
-def evaluate_stream(data: ProposalInput):
-    initial_state = {
-        "proposal_text": data.proposal_text,
-        "timeline_text": data.timeline_text,
-        "financials": data.financials,
-        "financials_file_base64": data.financials_file_base64,
-        "market": data.market,
-        "risks": data.risks,
-        "roi_model": data.roi_model,
-        "structured_data": {},
-        "classification": {},
-        "criteria_scores": {},
-        "roi_calculations": {},
-        "final_score": 0.0,
-        "rating": "",
-        "final_report": ""
-    }
-
-    def event_generator():
-        try:
-            final_state = initial_state.copy()
-            for step in evaluator_app.stream(initial_state):
-                node_name = list(step.keys())[0]
-                update = step[node_name]
-                final_state.update(update)
-                yield f"event: progress\ndata: {json.dumps({'node': node_name})}\n\n"
-                
-            record_id = save_evaluation(
-                proposal_data=data.dict(),
-                evaluation_result=final_state
-            )
-            
-            yield f"event: complete\ndata: {json.dumps({'status': 'success', 'id': record_id, 'result': final_state})}\n\n"
-        except Exception as e:
-            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/history")
 def get_history():

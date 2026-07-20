@@ -2,24 +2,21 @@ from typing import TypedDict, Dict, Any
 from langgraph.graph import StateGraph, END
 import json
 import os
+import base64
+from io import BytesIO
+import pandas as pd
 from dotenv import load_dotenv
 
 load_dotenv()
 
 class AgentState(TypedDict):
     proposal_text: str
-    timeline_text: str
-    financials: str
-    financials_file_base64: str
-    market: str
-    risks: str
-    roi_model: str
+    financials_base64: str
+    criteria_text: str
     
-    financial_extracted_data: str
     structured_data: Dict[str, Any]
     classification: Dict[str, Any]
     criteria_scores: Dict[str, Any]
-    roi_calculations: Dict[str, Any]
     final_score: float
     rating: str
     final_report: str
@@ -29,40 +26,36 @@ def get_llm():
         try:
             from langchain_openai import AzureChatOpenAI
             return AzureChatOpenAI(
-                azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
-                openai_api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-01"),
                 azure_deployment=os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME"),
+                api_version=os.environ.get("AZURE_OPENAI_API_VERSION"),
+                azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
                 api_key=os.environ.get("AZURE_OPENAI_API_KEY"),
                 temperature=0.2
             )
-        except ImportError:
+        except ImportError as e:
+            print(f"Error importing AzureChatOpenAI: {e}")
             pass
     return None
 
 def mock_llm_call(prompt: str, json_format=True) -> Any:
-    # Fallback mock for POC
     if "structuring" in prompt.lower():
-        return {"summary": "A mock proposal", "missing_info": []}
+        return {"summary": "A mocked structured proposal summary.", "missing_info": ["Detailed timelines"]}
     if "classification" in prompt.lower():
-        return {"division": "Technology", "subdivision": "AI SaaS"}
+        return {"division": "Technology", "subdivision": "SaaS"}
     if "criteria" in prompt.lower():
-        return {"market": 8, "feasibility": 6, "financial": 7, "strategic_fit": 9, "risk": 4}
-    if "roi" in prompt.lower():
-        return {"roi": "34%", "payback_period_months": 18, "irr": "6%", "breakeven_revenue": 450000}
+        return {"criteria_evaluations": [{"criteria": "Is scalable", "status": "match", "reason": "Software based"}], "overall_match_percentage": 85}
     if "report" in prompt.lower():
-        return "# Executive Summary\n\nThis is a mock report generated because no LLM key was provided."
+        return "# Executive Summary\n\nThis is a mocked report."
     return {}
 
 def call_llm(prompt: str, json_format=True) -> Any:
     llm = get_llm()
-    print(f"llm: {llm}")
-    print(f"prompt: {prompt}")
-    
     if not llm:
+        print("llm not found, providing mock result")
         return mock_llm_call(prompt, json_format)
         
     try:
-        from langchain.schema import HumanMessage
+        from langchain_core.messages import HumanMessage
         msg = llm.invoke([HumanMessage(content=prompt)])
         content = msg.content
         if json_format:
@@ -76,11 +69,31 @@ def call_llm(prompt: str, json_format=True) -> Any:
         print(f"LLM Error: {e}")
         return mock_llm_call(prompt, json_format)
 
+def extract_with_pandasai(base64_str: str, llm) -> str:
+    if not base64_str:
+        return "No financial data provided."
+    try:
+        excel_bytes = base64.b64decode(base64_str)
+        df = pd.read_excel(BytesIO(excel_bytes))
+        
+        if llm:
+            try:
+                from pandasai import SmartDataframe
+                sdf = SmartDataframe(df, config={"llm": llm})
+                res = sdf.chat("Summarize the key financial highlights and metrics.")
+                if res:
+                    return str(res)
+            except ImportError:
+                pass
+                
+        return df.head(20).to_markdown()
+    except Exception as e:
+        return f"Error extracting excel data: {e}"
+
 def agent_1_structuring(state: AgentState):
     prompt = f"""
     You are a Proposal Structuring Agent. Normalize the following input into a structured summary and identify any missing info.
-    Proposal: {state.get('proposal_text', '')}
-    Timeline: {state.get('timeline_text', '')}
+    Proposal Text: {state.get('proposal_text', '')}
     Respond ONLY in JSON with keys "summary" and "missing_info" (list of strings).
     """
     res = call_llm(prompt, json_format=True)
@@ -89,119 +102,66 @@ def agent_1_structuring(state: AgentState):
 def agent_2_classification(state: AgentState):
     summary = state.get('structured_data', {}).get('summary', state.get('proposal_text', ''))
     prompt = f"""
-    You are an Opportunity Classification Agent. Classify the proposal into a division (Technology, Retail, Manufacturing, Services, Logistics, Healthcare, Energy, Finance) and a subdivision.
+    You are an Opportunity Classification Agent. Classify the proposal into a division.
     Proposal Summary: {summary}
-    Respond ONLY in JSON with keys "division" and "subdivision".
+    Respond ONLY in JSON with keys "division" and "Summary" where summary will deail out top 2-3 reason to identify this division by submitted business opportunity proposal.
     """
     res = call_llm(prompt, json_format=True)
     return {"classification": res}
 
 def agent_3_criteria(state: AgentState):
+    llm = get_llm()
+    financials_text = extract_with_pandasai(state.get("financials_base64", ""), llm)
+    
     prompt = f"""
-    You are a Criteria Evaluation Agent. Evaluate the proposal across 5 criteria (0-10 scale):
-    market, feasibility, financial, strategic_fit, risk.
-    Proposal: {state.get('proposal_text', '')}
-    Financials: {state.get('financials', '')}
-    Market: {state.get('market', '')}
-    Risks: {state.get('risks', '')}
-    Respond ONLY in JSON with these 5 keys inside a root object.
+    You are a Criteria Evaluation Agent. 
+    Evaluate the proposal against the provided Admin Criteria. 
+    For each criteria, state whether it is a "match" or "fail", and a brief reason.
+    
+    Admin Criteria:
+    {state.get('criteria_text', 'No criteria defined.')}
+    
+    Proposal Data:
+    {state.get('proposal_text', '')}
+    
+    Financial Data:
+    {financials_text}
+    
+    Respond ONLY in JSON with keys "criteria_evaluations" (list of objects with "criteria", "status" as "match" or "fail", and "reason") and "overall_match_percentage" (0-100 integer).
     """
     res = call_llm(prompt, json_format=True)
     return {"criteria_scores": res}
 
-def extract_with_pandasai(base64_data: str) -> str:
-    if not base64_data:
-        return ""
-        
-    if "AZURE_OPENAI_API_KEY" not in os.environ:
-        print("No AZURE_OPENAI_API_KEY found, using mock PandasAI data")
-        return "MOCK EXCEL EXTRACT: Total Proposal Value=$5,000,000, IRR=20%, Payback Period=18 months"
-        
-    try:
-        import base64
-        import io
-        import pandas as pd
-        from pandasai import SmartDataframe
-        from pandasai.llm.azure_openai import AzureOpenAI
-        
-        excel_data = base64.b64decode(base64_data)
-        df = pd.read_excel(io.BytesIO(excel_data))
-        
-        print(f"Loaded Excel with {len(df)} rows. Analyzing with PandasAI...")
-        llm = AzureOpenAI(
-            api_token=os.environ["AZURE_OPENAI_API_KEY"],
-            api_base=os.environ.get("AZURE_OPENAI_ENDPOINT"),
-            api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-01"),
-            deployment_name=os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME")
-        )
-        sdf = SmartDataframe(df, config={"llm": llm})
-        
-        query = "Extract Total Proposal Value, IRR, and payback period from this data. Respond with a clear text summary."
-        response = sdf.chat(query)
-        return str(response)
-            
-    except Exception as e:
-        print(f"Failed to process with PandasAI: {e}")
-        return "MOCK EXCEL EXTRACT: Total Proposal Value=$5,000,000, IRR=20%, Payback Period=18 months"
-
-def agent_excel_parser(state: AgentState):
-    base64_data = state.get('financials_file_base64', '')
-    if base64_data:
-        print("Parsing uploaded Excel financials with PandasAI...")
-        extracted = extract_with_pandasai(base64_data)
-        return {"financial_extracted_data": extracted}
-    return {"financial_extracted_data": ""}
-
-def agent_4_roi(state: AgentState):
-    extracted_fin = state.get('financial_extracted_data', '')
-    fin_text = state.get('financials', '')
-    combined_financials = f"Raw Text: {fin_text}\nExtracted from Excel: {extracted_fin}"
-    
-    prompt = f"""
-    You are an ROI & Return Calculation Agent.
-    Calculate ROI, payback period, IRR, and breakeven revenue based on:
-    Financials: {combined_financials}
-    ROI Model: {state.get('roi_model', '')}
-    Respond ONLY in JSON with keys "roi", "payback_period_months", "irr", "breakeven_revenue".
-    """
-    res = call_llm(prompt, json_format=True)
-    return {"roi_calculations": res}
-
 def agent_5_scoring(state: AgentState):
     scores = state.get("criteria_scores", {})
-    m = float(scores.get("market", 5))
-    f = float(scores.get("feasibility", 5))
-    fin = float(scores.get("financial", 5))
-    s = float(scores.get("strategic_fit", 5))
-    r = float(scores.get("risk", 5))
+    match_percentage = scores.get("overall_match_percentage", 50)
     
-    final_score = (0.25 * m) + (0.20 * f) + (0.25 * fin) + (0.15 * s) - (0.15 * r)
+    final_score = match_percentage / 10.0
     
     if final_score >= 8.0:
-        rating = "Exceptional"
+        rating = "Exceptional Fit"
     elif final_score >= 6.5:
-        rating = "High Potential"
+        rating = "Good Fit"
     elif final_score >= 5.0:
-        rating = "Moderate"
+        rating = "Moderate Fit"
     else:
-        rating = "Low Potential"
+        rating = "Poor Fit"
         
     return {"final_score": final_score, "rating": rating}
 
 def agent_6_report(state: AgentState):
     prompt = f"""
-    You are a Summary Report Agent. Generate a human-readable markdown report.
-    Use the following data:
+    You are a Summary Report Agent. Generate a human-readable markdown report summarizing the fit of the proposal against the admin criteria.
+    
+    Data:
     Classification: {state.get('classification')}
-    Criteria: {state.get('criteria_scores')}
-    ROI: {state.get('roi_calculations')}
+    Criteria Evaluations: {state.get('criteria_scores')}
     Final Score: {state.get('final_score')} / Rating: {state.get('rating')}
     
     Sections:
     1. Executive Summary
-    2. Opportunity Classification
-    3. Criteria Evaluation Table
-    4. Financial & ROI Analysis
+    2. Classification
+    3. Criteria Evaluation Results
     """
     res = call_llm(prompt, json_format=False)
     return {"final_report": res}
@@ -212,17 +172,13 @@ def build_graph():
     workflow.add_node("structuring", agent_1_structuring)
     workflow.add_node("classification", agent_2_classification)
     workflow.add_node("criteria", agent_3_criteria)
-    workflow.add_node("excel_parser", agent_excel_parser)
-    workflow.add_node("roi", agent_4_roi)
     workflow.add_node("scoring", agent_5_scoring)
     workflow.add_node("report", agent_6_report)
     
     workflow.set_entry_point("structuring")
     workflow.add_edge("structuring", "classification")
     workflow.add_edge("classification", "criteria")
-    workflow.add_edge("criteria", "excel_parser")
-    workflow.add_edge("excel_parser", "roi")
-    workflow.add_edge("roi", "scoring")
+    workflow.add_edge("criteria", "scoring")
     workflow.add_edge("scoring", "report")
     workflow.add_edge("report", END)
     
