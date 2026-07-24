@@ -18,15 +18,17 @@ Enhance the Agentic Business Proposal Evaluator POC by moving file processing to
 - **Admin View**: 
   - Allows uploading criteria files (TXT/PDF) which are sent to a new `/upload_criteria` endpoint to be embedded into the `evaluation_criteria` Qdrant collection.
 - **Submit View**: 
-  - Unified multiple file upload component (`accept_multiple_files=True`) for Business Proposals (accepting PDFs and Excel files).
-  - Users click "Upload to Knowledge Base" first, which securely pushes the files to the `business_proposals` collection via `/upload_knowledge`.
-  - The "Evaluate Proposal" button remains disabled until a successful upload. Once clicked, it fetches the report from `/evaluate`.
+  - Unified multiple file upload component (`accept_multiple_files=True`) for Business Proposals.
+  - A manual "Upload to Knowledge Base" button is provided to initiate the upload. Upload progress is displayed to the user.
+  - Files are securely pushed to the `business_proposals` collection via `/upload_knowledge`.
+  - The "Evaluate Proposal" button remains disabled until a successful upload. Once clicked, it fetches the report from `/evaluate`. The upload section and evaluate button remain visible and scrollable along with the results.
 - **Results View (5 Tabs)**:
   - **Tab 1 - Criteria Evaluation**: Data table visualizing match/fail status (`Criteria`, `Result`, `Assessment`, `Implication`).
   - **Tab 2 - Classification**: Division classification JSON output.
   - **Tab 3 - Evaluation Report**: Full markdown report.
   - **Tab 4 - Executive Summary**: Downloadable DOCX summary using `python-docx`.
   - **Tab 5 - Detailed Summary**: Downloadable PDF report using `fpdf2`.
+  - **Persistent Query Panel**: A fixed "Ask & Evaluate" panel at the bottom of the results view allows users to ask ad-hoc questions or evaluate new custom criteria at any time, independently of the active tab.
 
 ### Backend (`backend/main.py`)
 - **Endpoints**: 

@@ -13,6 +13,10 @@ implemntation.md
 # C extensions
 *.so
 
+# react
+node_modules
+
+
 # Distribution / packaging
 .Python
 build/

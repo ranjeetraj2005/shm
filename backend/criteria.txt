@@ -1,5 +1,0 @@
-1. check suffient level of business opportunity information found like business case, datilaed timeline , benchmark etc
-2. opportunity alligned with deprtament like [SAAS, internat etc]
-3. proposed minimum investment $10K
-4. attractive return like IRR 5% and payvack 1 year
-5. potential duplicate existing investment

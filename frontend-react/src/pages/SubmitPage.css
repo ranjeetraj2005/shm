@@ -1,0 +1,40 @@
+.upload-section {
+  padding: 32px;
+}
+
+.step-badge {
+  background-color: rgba(202, 202, 6, 0.2);
+  color: var(--secondary);
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.large-drop-area {
+  padding: 60px 20px;
+}
+
+.large-drop-area h2 {
+  color: var(--text-dark);
+  margin-top: 16px;
+  margin-bottom: 8px;
+}
+
+.evaluation-action {
+  border-top: 1px solid rgba(0,0,0,0.05);
+  padding-top: 24px;
+}
+
+.btn-large {
+  padding: 12px 24px;
+  font-size: 1.05rem;
+  border-radius: 10px;
+}
+
+.loading-state {
+  text-align: center;
+  padding: 60px;
+  color: var(--text-light);
+  font-style: italic;
+}

@@ -13,6 +13,7 @@ class AgentState(TypedDict):
     proposal_text: str
     financials_base64: str
     criteria_text: str
+    past_opportunities_text: str
     
     structured_data: Dict[str, Any]
     classification: Dict[str, Any]
@@ -46,6 +47,12 @@ def mock_llm_call(prompt: str, json_format=True) -> Any:
         return {"criteria_evaluations": [{"criteria": "Is scalable", "status": "match", "reason": "Software based"}], "overall_match_percentage": 85}
     if "report" in prompt.lower():
         return "# Executive Summary\n\nThis is a mocked report."
+    if "query routing" in prompt.lower():
+        return {"enhanced_query": "Mocked enhanced query", "type": "document_query"}
+    if "proposal explanation" in prompt.lower():
+        return {"answer": "This is a mocked answer from the proposal."}
+    if "ad-hoc criteria" in prompt.lower():
+        return {"criteria": "mocked criteria", "status": "match", "reason": "mocked reason"}
     return {}
 
 def call_llm(prompt: str, json_format=True) -> Any:
@@ -117,9 +124,13 @@ def agent_3_criteria(state: AgentState):
     You are a Criteria Evaluation Agent. 
     Evaluate the proposal against the provided Admin Criteria. 
     For each criteria, state whether it is a "match" or "fail", and a brief reason.
+    Use the Past Opportunities context to check for duplicate existing investments if the criteria asks for it.
     
     Admin Criteria:
     {state.get('criteria_text', 'No criteria defined.')}
+    
+    Past Opportunities (for duplication checks):
+    {state.get('past_opportunities_text', 'None found.')}
     
     Proposal Data:
     {state.get('proposal_text', '')}
@@ -185,3 +196,65 @@ def build_graph():
     return workflow.compile()
 
 evaluator_app = build_graph()
+
+def process_user_query(query: str, proposal_text: str, past_opportunities_text: str = "") -> dict:
+    """
+    Enhance the query, classify it, and evaluate it based on the classification.
+    """
+    prompt = f"""
+    You are a Query Routing Agent. The user has provided the following query regarding a business proposal:
+    "{query}"
+    
+    Your task is to:
+    1. "enhanced_query": Rewrite the query to be clear and optimized for document retrieval or evaluation.
+    2. "type": Classify the query as either "document_query" (asking for factual info/explanation from the proposal) or "criteria_query" (providing a new evaluation criteria to judge the proposal against).
+    
+    Respond ONLY in JSON format with keys "enhanced_query" and "type".
+    """
+    classification_res = call_llm(prompt, json_format=True)
+    
+    enhanced_query = classification_res.get("enhanced_query", query)
+    query_type = classification_res.get("type", "document_query")
+    
+    if query_type == "criteria_query":
+        eval_prompt = f"""
+        You are a Criteria Evaluation Agent. 
+        Evaluate the proposal against the following ad-hoc criteria.
+        State whether it is a "match" or "fail", and a brief reason.
+        
+        Ad-hoc Criteria: {enhanced_query}
+        
+        Past Opportunities (for duplication checks):
+        {past_opportunities_text}
+        
+        Proposal Data:
+        {proposal_text}
+        
+        Respond ONLY in JSON with keys "criteria", "status" (as "match" or "fail"), and "reason".
+        """
+        eval_res = call_llm(eval_prompt, json_format=True)
+        return {
+            "type": "criteria_query",
+            "enhanced_query": enhanced_query,
+            "result": eval_res
+        }
+    else:
+        doc_prompt = f"""
+        You are a Proposal Explanation Agent.
+        Answer the following user query based ONLY on the provided Proposal Data.
+        If the answer is not in the data, say "I cannot find the answer in the provided proposal."
+        
+        User Query: {enhanced_query}
+        
+        Proposal Data:
+        {proposal_text}
+        
+        Respond ONLY in JSON with a single key "answer".
+        """
+        doc_res = call_llm(doc_prompt, json_format=True)
+        return {
+            "type": "document_query",
+            "enhanced_query": enhanced_query,
+            "result": doc_res
+        }
+
